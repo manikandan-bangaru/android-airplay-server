@@ -59,12 +59,14 @@ class VideoRenderer(ctx: Context) {
         videoHeight = h
         pipeline.setVideoSize(w, h)
         stopCodec()
-        lastKeyframe = null
+        // the keyframe that carried this size usually arrives just before; keep it for direct restart
+        if (direct) _restartFromKeyframe()
     }
 
     // doesn't restart codec; decoder renders into pipeline's own persistent surface
     fun setSurface(surface: Surface) = synchronized(lock) {
         displaySurface = surface
+        if (direct) Log.i(TAG, "direct: display surface set (codec=${codec != null}, keyframe=${lastKeyframe != null})")
         if (!direct) {
             pipeline.setDisplaySurface(surface)
             return@synchronized
@@ -161,11 +163,17 @@ class VideoRenderer(ctx: Context) {
     fun feedFrame(data: ByteArray, ntpTimeNs: Long, isH265: Boolean) {
         synchronized(lock) {
             _updateStats(data.size)
-            if (videoWidth == 0 || videoHeight == 0) return
-            if (direct && _isKeyframe(data, isH265)) {
+            val key = _isKeyframe(data, isH265)
+            if (direct && key) {
                 lastKeyframe = data
                 lastKeyframeNtpNs = ntpTimeNs
                 lastKeyframeH265 = isH265
+            }
+            if (videoWidth == 0 || videoHeight == 0) return
+            // direct mode: senders like macOS send keyframes rarely, so resume from the cached one
+            if (direct && codec == null && !key) {
+                _restartFromKeyframe()
+                if (codec == null) return
             }
 
             if (codec == null || isH265 != currentH265) {
@@ -230,7 +238,10 @@ class VideoRenderer(ctx: Context) {
 
     private fun startCodec(h265: Boolean) {
         val s = if (direct) {
-            displaySurface?.takeIf { it.isValid } ?: return
+            displaySurface?.takeIf { it.isValid } ?: run {
+                Log.i(TAG, "direct: waiting for display surface")
+                return
+            }
         } else {
             pipeline.start()
             pipeline.setVideoSize(videoWidth, videoHeight)
