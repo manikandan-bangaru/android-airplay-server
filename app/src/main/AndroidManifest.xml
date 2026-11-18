@@ -61,6 +61,22 @@
             </intent-filter>
         </receiver>
 
+        <!-- Lets a launcher tile switch the receiver on/off without opening the app (DUMP-guarded). -->
+        <activity
+            android:name=".ServerControlActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true"
+            android:permission="android.permission.DUMP"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="io.github.jqssun.airplay.START_SERVER" />
+                <action android:name="io.github.jqssun.airplay.STOP_SERVER" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
         <receiver
             android:name=".SettingsReceiver"
             android:exported="true"
