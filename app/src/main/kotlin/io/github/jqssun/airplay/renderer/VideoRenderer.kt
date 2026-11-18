@@ -306,6 +306,11 @@ class VideoRenderer(ctx: Context) {
         }
         codec = c
         codecName = (if (h265) "H.265" else "H.264") + " (${c.name})"
+        if (direct && android.os.Build.VERSION.SDK_INT >= 31) {
+            runCatching { c.supportedVendorParameters }.getOrNull()
+                ?.filter { Regex("lat|delay|tunnel|fast|game|realtime|render", RegexOption.IGNORE_CASE).containsMatchIn(it) }
+                ?.let { Log.i(TAG, "vendor params: $it") }
+        }
     }
 
     private fun stopCodec() {
