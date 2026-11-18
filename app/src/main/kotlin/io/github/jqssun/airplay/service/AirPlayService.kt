@@ -81,6 +81,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     private var nativeHandle = 0L
     private var nsdManager: NsdServiceManager? = null
     private var usbAdvertiser: UsbMdnsAdvertiser? = null
+    private var lanAdvertiser: UsbMdnsAdvertiser? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var foregroundStarted = false
     private var lastOrientation = Configuration.ORIENTATION_UNDEFINED
@@ -457,6 +458,10 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             }.apply { start() }
         } else {
             nsdManager?.register(services)
+            // own responder on wi-fi/ethernet as well; it yields if the system responder already answers
+            lanAdvertiser = UsbMdnsAdvertiser(services, UsbMdnsAdvertiser.LAN_IFACE, "airplay-lan", ignoreSelf = true) { iface, addr ->
+                if (iface != null) log("LAN mDNS on $iface (${addr?.hostAddress})")
+            }.apply { start() }
         }
 
         _serverState.value = ServerState.RUNNING
@@ -506,6 +511,8 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             NativeBridge.nativeDestroy(nativeHandle)
             nativeHandle = 0L
         }
+        lanAdvertiser?.stop()
+        lanAdvertiser = null
         nsdManager?.release()
         nsdManager = null
         wakeLock?.release()
@@ -541,6 +548,8 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         dacpController?.reset()
         usbAdvertiser?.stop()
         usbAdvertiser = null
+        lanAdvertiser?.stop()
+        lanAdvertiser = null
         nsdManager?.release()
         nsdManager = null
         wakeLock?.release()
