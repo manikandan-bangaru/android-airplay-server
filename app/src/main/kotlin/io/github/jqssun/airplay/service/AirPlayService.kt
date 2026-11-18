@@ -353,6 +353,8 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             promoteToForeground()
             _startServer(ensureServiceStarted = false)
             if (_serverState.value != ServerState.RUNNING) stopSelf(startId)
+        } else if (intent?.action == ACTION_STOP_SERVER) {
+            stopServer()
         }
         return START_NOT_STICKY
     }
@@ -1197,6 +1199,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         const val ACTION_NEXT = "io.github.jqssun.airplay.NEXT"
         const val ACTION_PREV = "io.github.jqssun.airplay.PREV"
         const val ACTION_START_SERVER = "io.github.jqssun.airplay.START_SERVER"
+        const val ACTION_STOP_SERVER = "io.github.jqssun.airplay.STOP_SERVER"
         // shared with dpad/double-tap seeks
         const val VIDEO_SEEK_STEP_MS = 10_000L
         const val VIDEO_POLL_PENDING_TIMEOUT_MS = 3_000L
