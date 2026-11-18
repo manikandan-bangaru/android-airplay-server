@@ -23,6 +23,12 @@ class VideoRenderer(ctx: Context) {
     private var videoHeight = 0
     private var firstFrameQueued = false
 
+    // realtek gl can't import cropped decoder buffers (RTK_EGL "invalid size"), so render straight to the display surface
+    private var direct = false
+    private var lastKeyframe: ByteArray? = null
+    private var lastKeyframeNtpNs = 0L
+    private var lastKeyframeH265 = false
+
     // stats
     @Volatile var fps = 0; private set
     @Volatile var bitrateBps = 0L; private set
@@ -53,25 +59,54 @@ class VideoRenderer(ctx: Context) {
         videoHeight = h
         pipeline.setVideoSize(w, h)
         stopCodec()
+        lastKeyframe = null
     }
 
     // doesn't restart codec; decoder renders into pipeline's own persistent surface
     fun setSurface(surface: Surface) = synchronized(lock) {
         displaySurface = surface
-        pipeline.setDisplaySurface(surface)
+        if (!direct) {
+            pipeline.setDisplaySurface(surface)
+            return@synchronized
+        }
+        val c = codec
+        if (c != null) {
+            try { c.setOutputSurface(surface) } catch (e: Exception) {
+                Log.w(TAG, "setOutputSurface failed, restarting codec", e)
+                stopCodec()
+                _restartFromKeyframe()
+            }
+        } else {
+            _restartFromKeyframe()
+        }
     }
 
     fun clearSurface(surface: Surface) = synchronized(lock) {
         if (displaySurface !== surface) return@synchronized
         displaySurface = null
-        pipeline.setDisplaySurface(null)
+        if (direct) stopCodec() else pipeline.setDisplaySurface(null)
+    }
+
+    // direct mode: the codec needs a display surface, so start it once one exists using the last keyframe
+    private fun _restartFromKeyframe() {
+        val key = lastKeyframe ?: return
+        if (videoWidth == 0 || videoHeight == 0 || displaySurface?.isValid != true) return
+        try {
+            startCodec(lastKeyframeH265)
+            _feedToCodec(key, lastKeyframeNtpNs)
+            drainOutput()
+        } catch (e: Exception) {
+            Log.w(TAG, "Direct restart failed", e)
+            stopCodec()
+        }
     }
 
     fun selectDecoders(w: Int, h: Int, fps: Int, h265: Boolean?): Boolean = synchronized(lock) {
         avcDecoder = selector.avc()
         hevcDecoder = if (h265 != false) selector.hevc(avcDecoder, w, h, fps, force = h265 == true) else null
         maxFps = fps
-        Log.i(TAG, "decoders: avc=${avcDecoder?.name} hevc=${hevcDecoder?.name}")
+        direct = listOfNotNull(avcDecoder, hevcDecoder).any { _isRealtek(it.name) }
+        Log.i(TAG, "decoders: avc=${avcDecoder?.name} hevc=${hevcDecoder?.name} direct=$direct")
         hevcDecoder != null
     }
 
@@ -87,7 +122,10 @@ class VideoRenderer(ctx: Context) {
     // codec per mirror session; pipeline persists across sessions
     fun startSession() = synchronized(lock) { _resetStats() }
 
-    fun stopSession() = synchronized(lock) { stopCodec() }
+    fun stopSession() = synchronized(lock) {
+        stopCodec()
+        lastKeyframe = null
+    }
 
     private fun _resetStats() {
         fps = 0; bitrateBps = 0; frameCount = 0; codecName = ""
@@ -124,6 +162,11 @@ class VideoRenderer(ctx: Context) {
         synchronized(lock) {
             _updateStats(data.size)
             if (videoWidth == 0 || videoHeight == 0) return
+            if (direct && _isKeyframe(data, isH265)) {
+                lastKeyframe = data
+                lastKeyframeNtpNs = ntpTimeNs
+                lastKeyframeH265 = isH265
+            }
 
             if (codec == null || isH265 != currentH265) {
                 // a stale reference frame decodes to corruption, so wait for a keyframe to (re)start
@@ -186,9 +229,13 @@ class VideoRenderer(ctx: Context) {
     }
 
     private fun startCodec(h265: Boolean) {
-        pipeline.start()
-        pipeline.setVideoSize(videoWidth, videoHeight)
-        val s = pipeline.inputSurface ?: return
+        val s = if (direct) {
+            displaySurface?.takeIf { it.isValid } ?: return
+        } else {
+            pipeline.start()
+            pipeline.setVideoSize(videoWidth, videoHeight)
+            pipeline.inputSurface ?: return
+        }
         currentH265 = h265
         val mime = if (h265) DecoderSelector.HEVC else DecoderSelector.AVC
         val info = (if (h265) hevcDecoder else avcDecoder) ?: error("no decoder selected for $mime")
@@ -202,7 +249,7 @@ class VideoRenderer(ctx: Context) {
             Log.w(TAG, "Hardware decoder failed, trying software fallback", e)
             _startWithLadder(sw, mime, s, h265)
         }
-        Log.i(TAG, "Video codec started: $mime ${videoWidth}x${videoHeight} ($codecName)")
+        Log.i(TAG, "Video codec started: $mime ${videoWidth}x${videoHeight} ($codecName)${if (direct) " direct" else ""}")
     }
 
     private fun _startWithLadder(info: MediaCodecInfo, mime: String, s: Surface, h265: Boolean) {
@@ -317,6 +364,9 @@ class VideoRenderer(ctx: Context) {
         val variance = (sumSq / count) - (mean * mean)
         return (kotlin.math.sqrt(variance.coerceAtLeast(0.0)) / 1000.0).toLong()
     }
+
+    private fun _isRealtek(name: String) =
+        name.startsWith("c2.realtek", ignoreCase = true) || name.startsWith("omx.realtek", ignoreCase = true)
 
     companion object {
         private const val TAG = "VideoRenderer"
