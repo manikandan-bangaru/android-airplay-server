@@ -11,12 +11,14 @@ val localProps = Properties().apply {
     rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use(::load)
 }
 
-val allAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+// optional local.properties "abis=armeabi-v7a" to build fewer ABIs
+val allAbis = localProps.getProperty("abis")?.split(",")?.map { it.trim() }
+    ?: listOf("arm64-v8a", "armeabi-v7a", "x86_64")
 
 android {
     namespace = "io.github.jqssun.airplay"
     compileSdk = 37
-    ndkVersion = "27.0.12077973"
+    ndkVersion = localProps.getProperty("ndkVersion") ?: "27.0.12077973"
 
     if (localProps.containsKey("storeFile")) {
         signingConfigs {

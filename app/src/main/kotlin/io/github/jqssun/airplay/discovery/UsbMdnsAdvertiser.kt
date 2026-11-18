@@ -25,6 +25,10 @@ import kotlin.random.Random
  */
 class UsbMdnsAdvertiser(
     private val services: List<MdnsService>,
+    private val ifacePattern: Regex = USB_IFACE,
+    private val hostPrefix: String = "airplay-usb",
+    /** ignore packets this device sent itself, e.g. a local system responder that never reaches the wire */
+    private val ignoreSelf: Boolean = false,
     private val onLink: (iface: String?, addr: Inet4Address?) -> Unit,
 ) {
     private class Link(val name: String, val addr: Inet4Address, val mask: Int, val socket: MulticastSocket) {
@@ -41,7 +45,7 @@ class UsbMdnsAdvertiser(
     private val running get() = stopped.count > 0
     private var thread: Thread? = null
     private val main = Handler(Looper.getMainLooper())
-    private val host = listOf("airplay-usb-%06x".format(Random.nextInt(0x1000000)), "local")
+    private val host = listOf("$hostPrefix-%06x".format(Random.nextInt(0x1000000)), "local")
 
     private var link: Link? = null
     private var state = State.CHECKING
@@ -52,7 +56,7 @@ class UsbMdnsAdvertiser(
     private var nextAnnounce = 0L
 
     fun start() {
-        thread = Thread(::_loop, "usb-mdns").apply { isDaemon = true; start() }
+        thread = Thread(::_loop, "$hostPrefix-mdns").apply { isDaemon = true; start() }
     }
 
     fun stop() {
@@ -109,7 +113,7 @@ class UsbMdnsAdvertiser(
     private fun _report(l: Link?) = main.post { if (running) onLink(l?.name, l?.addr) }
 
     private fun _findUsb() = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
-        .filter { USB_IFACE.matches(it.name) && it.isUp }
+        .filter { ifacePattern.matches(it.name) && it.isUp }
         .firstNotNullOfOrNull { ni -> ni.interfaceAddresses.firstOrNull { it.address is Inet4Address }?.let { ni to it } }
 
     private fun _open(ni: NetworkInterface, ia: InterfaceAddress): Link? {
@@ -176,6 +180,7 @@ class UsbMdnsAdvertiser(
     private fun _onPacket(l: Link, packet: DatagramPacket) {
         val src = packet.address as? Inet4Address ?: return
         if (packet.length < 12 || !l.covers(src)) return
+        if (ignoreSelf && src == l.addr) return
         val data = packet.data.copyOf(packet.length)
         if ((_rd16(data, 2) and 0x8000) == 0) {
             // a probe for our names means another responder is about to claim them
@@ -298,7 +303,11 @@ class UsbMdnsAdvertiser(
         if (answers.isEmpty()) return
         answers.keys.forEach(extras::remove)
         // rfc 6762 6.7
-        if (from.port == MDNS_PORT) _send(l, answers.values.toList(), extras.values.toList())
+        if (from.port == MDNS_PORT) {
+            _send(l, answers.values.toList(), extras.values.toList())
+            // also answer the asker directly (rfc 6762 5.4 / 6): some wi-fi links never deliver our multicast
+            if (ignoreSelf) _send(l, answers.values.toList(), extras.values.toList(), to = from)
+        }
         else _send(l, answers.values.toList(), extras.values.toList(), legacy = d.copyOf(pos), to = from)
     }
 
@@ -340,6 +349,8 @@ class UsbMdnsAdvertiser(
     companion object {
         private const val TAG = "UsbMdnsAdvertiser"
         private val USB_IFACE = Regex("(usb|rndis|ncm)\\d+")
+        /** wi-fi / ethernet, for devices whose system responder never puts NSD records on the wire */
+        val LAN_IFACE = Regex("(wlan|eth)\\d+")
         private const val MDNS_PORT = 5353
         private val GROUP = InetSocketAddress(InetAddress.getByName("224.0.0.251"), MDNS_PORT)
         private const val SCAN_MS = 2000L
